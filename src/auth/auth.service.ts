@@ -91,9 +91,22 @@ export class AuthService {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new UnauthorizedException();
     return {
-      user: { id: user.id, email: user.email, name: user.name, avatar_url: user.avatar_url },
+      user: { id: user.id, email: user.email, name: user.name, phone: user.phone, avatar_url: user.avatar_url },
       profiles: await this.profilesOf(userId),
     };
+  }
+
+  /** PATCH /me — atualiza nome/telefone/foto do usuário (perfil do síndico). */
+  async updateMe(userId: string, dto: { name?: string; phone?: string; avatar_url?: string }) {
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        ...(dto.name !== undefined ? { name: dto.name } : {}),
+        ...(dto.phone !== undefined ? { phone: dto.phone } : {}),
+        ...(dto.avatar_url !== undefined ? { avatar_url: dto.avatar_url } : {}),
+      },
+    });
+    return this.me(userId);
   }
 
   private async profilesOf(userId: string) {

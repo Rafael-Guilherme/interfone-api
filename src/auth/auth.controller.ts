@@ -1,6 +1,6 @@
-import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Patch, Post, UseGuards } from '@nestjs/common';
 import { AuthService } from './auth.service';
-import { RequestOtpDto, VerifyOtpDto } from './dto';
+import { RequestOtpDto, UpdateMeDto, VerifyOtpDto } from './dto';
 import { CurrentUserId, JwtAuthGuard } from '../common/jwt-auth.guard';
 
 @Controller()
@@ -23,5 +23,11 @@ export class AuthController {
   @Get('me')
   me(@CurrentUserId() userId: string) {
     return this.auth.me(userId);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Patch('me')
+  updateMe(@CurrentUserId() userId: string, @Body() dto: UpdateMeDto) {
+    return this.auth.updateMe(userId, dto);
   }
 }

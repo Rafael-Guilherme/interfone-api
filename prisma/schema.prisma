@@ -21,6 +21,7 @@ model User {
   email             String     @unique
   google_id         String?    @unique // login com Google (só no app)
   name              String
+  phone             String?
   avatar_url        String?
   email_verified_at DateTime?
   is_super_admin    Boolean    @default(false) // admin do painel web
@@ -98,9 +99,23 @@ model Condominium {
   slug       String      @unique // usado no link personalizado (deep link)
   join_code  String      @unique // código que o morador digita p/ confirmar o condo
   name       String
-  street     String?
-  city       String?
-  state      String?
+  photo_url  String? // foto do interfone (data URI no MVP; S3 na produção)
+
+  // Endereço (preenchido via CEP / ViaCEP)
+  zip_code      String?
+  street        String?
+  street_number String?
+  complement    String?
+  district      String? // bairro
+  city          String?
+  state         String?
+
+  // Geofencing do QR: convidado/entregador só usa o QR dentro do raio
+  latitude     Decimal? @db.Decimal(10, 7)
+  longitude    Decimal? @db.Decimal(10, 7)
+  geo_radius_m Int? // raio de atuação em metros
+  geo_required Boolean  @default(false)
+
   status     CondoStatus @default(active)
   created_at DateTime    @default(now())
   updated_at DateTime    @updatedAt

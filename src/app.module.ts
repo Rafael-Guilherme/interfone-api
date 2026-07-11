@@ -4,6 +4,9 @@ import { JwtModule } from '@nestjs/jwt';
 import { PrismaModule } from './prisma/prisma.module';
 import { LiveKitModule } from './livekit/livekit.module';
 import { AuthModule } from './auth/auth.module';
+import { CondominiumsModule } from './condominiums/condominiums.module';
+import { AnnouncementsModule } from './announcements/announcements.module';
+import { CommonAreasModule } from './common-areas/common-areas.module';
 import { DeliveryModule } from './delivery/delivery.module';
 import { CallsModule } from './calls/calls.module';
 import { HealthController } from './health.controller';
@@ -29,6 +32,9 @@ import { HealthController } from './health.controller';
     PrismaModule,
     LiveKitModule,
     AuthModule,
+    CondominiumsModule,
+    AnnouncementsModule,
+    CommonAreasModule,
     DeliveryModule,
     CallsModule,
   ],

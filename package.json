@@ -10,7 +10,8 @@
     "prod": "node dist/main.js",
     "prisma:generate": "prisma generate",
     "db:push": "prisma db push",
-    "db:seed": "ts-node prisma/seed.ts"
+    "db:seed": "ts-node prisma/seed.ts",
+    "approve": "ts-node prisma/approve.ts"
   },
   "prisma": {
     "seed": "ts-node prisma/seed.ts"
