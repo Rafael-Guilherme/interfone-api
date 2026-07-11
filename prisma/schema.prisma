@@ -1,0 +1,376 @@
+// ============================================================================
+// Interfone — schema.prisma consolidado
+// Base do MVP (PLANEJAMENTO_INICIAL) + extensões do app completo:
+//   QR de morador, reservas, comunicados, leitura de comunicados.
+// Banco: PostgreSQL · ORM: Prisma
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================= AUTH =========================================
+
+model User {
+  id                String     @id @default(uuid()) @db.Uuid
+  email             String     @unique
+  google_id         String?    @unique // login com Google (só no app)
+  name              String
+  avatar_url        String?
+  email_verified_at DateTime?
+  is_super_admin    Boolean    @default(false) // admin do painel web
+  status            UserStatus @default(active)
+  created_at        DateTime   @default(now())
+  updated_at        DateTime   @updatedAt
+  deleted_at        DateTime?
+
+  profiles       Profile[]
+  refresh_tokens RefreshToken[]
+  device_tokens  DeviceToken[]
+  otp_codes      OtpCode[]
+}
+
+enum UserStatus {
+  active
+  blocked
+  deleted
+}
+
+model RefreshToken {
+  id         String    @id @default(uuid()) @db.Uuid
+  user_id    String    @db.Uuid
+  user       User      @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  token_hash String    @unique
+  expires_at DateTime
+  revoked_at DateTime?
+  created_at DateTime  @default(now())
+
+  @@index([user_id])
+}
+
+model OtpCode {
+  id          String     @id @default(uuid()) @db.Uuid
+  user_id     String?    @db.Uuid
+  user        User?      @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  destination String // e-mail
+  code_hash   String
+  purpose     OtpPurpose @default(login)
+  expires_at  DateTime
+  used_at     DateTime?
+  attempts    Int        @default(0)
+  created_at  DateTime   @default(now())
+
+  @@index([destination, purpose])
+}
+
+enum OtpPurpose {
+  signup
+  login
+}
+
+model DeviceToken {
+  id           String         @id @default(uuid()) @db.Uuid
+  user_id      String         @db.Uuid
+  user         User           @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  platform     DevicePlatform
+  push_token   String         @unique
+  voip_token   String?        @unique // iOS PushKit (chamada)
+  last_seen_at DateTime       @default(now())
+  created_at   DateTime       @default(now())
+
+  @@index([user_id])
+}
+
+enum DevicePlatform {
+  ios
+  android
+}
+
+// ===================== INTERFONE (dados do gestor) ==========================
+
+model Condominium {
+  id         String      @id @default(uuid()) @db.Uuid
+  slug       String      @unique // usado no link personalizado (deep link)
+  join_code  String      @unique // código que o morador digita p/ confirmar o condo
+  name       String
+  street     String?
+  city       String?
+  state      String?
+  status     CondoStatus @default(active)
+  created_at DateTime    @default(now())
+  updated_at DateTime    @updatedAt
+
+  blocks       Block[]
+  units        Unit[]
+  profiles     Profile[]
+  qr_codes     QrCode[]
+  calls        Call[]
+  messages     MissedCallMessage[]
+  common_areas CommonArea[]
+  announcements Announcement[]
+}
+
+enum CondoStatus {
+  active
+  suspended
+  deleted
+}
+
+model Block {
+  id             String      @id @default(uuid()) @db.Uuid
+  condominium_id String      @db.Uuid
+  condominium    Condominium @relation(fields: [condominium_id], references: [id], onDelete: Cascade)
+  name           String
+  created_at     DateTime    @default(now())
+
+  units         Unit[]
+  announcements Announcement[]
+
+  @@unique([condominium_id, name])
+}
+
+model Unit {
+  id             String      @id @default(uuid()) @db.Uuid
+  condominium_id String      @db.Uuid
+  condominium    Condominium @relation(fields: [condominium_id], references: [id], onDelete: Cascade)
+  block_id       String?     @db.Uuid
+  block          Block?      @relation(fields: [block_id], references: [id], onDelete: Cascade)
+  number         String
+  created_at     DateTime    @default(now())
+
+  memberships UnitMembership[]
+  qr_codes    QrCode[]
+
+  @@unique([condominium_id, block_id, number])
+}
+
+// ===================== PERFIL (user x condo x papel) ========================
+
+model Profile {
+  id             String        @id @default(uuid()) @db.Uuid
+  user_id        String        @db.Uuid
+  user           User          @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  condominium_id String        @db.Uuid
+  condominium    Condominium   @relation(fields: [condominium_id], references: [id], onDelete: Cascade)
+  role           ProfileRole   @default(resident)
+  status         ProfileStatus @default(pending) // pending até o gestor aprovar
+  approved_by_id String?       @db.Uuid
+  approved_at    DateTime?
+  created_at     DateTime      @default(now())
+  updated_at     DateTime      @updatedAt
+
+  unit_memberships   UnitMembership[]
+  qr_codes_created   QrCode[]           @relation("QrCreator")
+  reservations       Reservation[]
+  announcements      Announcement[]     @relation("AnnouncementAuthor")
+  announcement_reads AnnouncementRead[]
+
+  @@unique([user_id, condominium_id, role])
+  @@index([condominium_id, role, status])
+}
+
+enum ProfileRole {
+  resident
+  manager
+  sub_manager
+  delivery
+  merchant
+  service_provider
+  staff
+}
+
+enum ProfileStatus {
+  pending
+  active
+  blocked
+}
+
+model UnitMembership {
+  id         String   @id @default(uuid()) @db.Uuid
+  profile_id String   @db.Uuid
+  profile    Profile  @relation(fields: [profile_id], references: [id], onDelete: Cascade)
+  unit_id    String   @db.Uuid
+  unit       Unit     @relation(fields: [unit_id], references: [id], onDelete: Cascade)
+  created_at DateTime @default(now())
+
+  @@unique([profile_id, unit_id])
+}
+
+// ===================== QR CODE (gestor + morador) ===========================
+
+model QrCode {
+  id             String      @id @default(uuid()) @db.Uuid
+  condominium_id String      @db.Uuid
+  condominium    Condominium @relation(fields: [condominium_id], references: [id], onDelete: Cascade)
+  unit_id        String?     @db.Uuid // null = QR geral do condo (escolhe unidade na web)
+  unit           Unit?       @relation(fields: [unit_id], references: [id], onDelete: Cascade)
+
+  created_by_id String?  @db.Uuid // Profile que gerou (null = QR de sistema/gestor)
+  created_by    Profile? @relation("QrCreator", fields: [created_by_id], references: [id], onDelete: SetNull)
+
+  kind  QrKind  @default(manager) // manager (portaria/unidade) | resident (visita)
+  label String? // "recipient" do wireframe (ex.: nome do visitante)
+  token String  @unique
+
+  validity_mode QrValidity @default(fixed) // today | period | fixed
+  valid_from    DateTime?
+  valid_until   DateTime?
+
+  usage_mode QrUsage   @default(unlimited) // single | unlimited
+  used_count Int       @default(0)
+  used_at    DateTime? // primeiro uso (para single)
+
+  active     Boolean  @default(true)
+  created_at DateTime @default(now())
+
+  @@index([condominium_id, kind])
+  @@index([created_by_id])
+}
+
+enum QrKind {
+  manager
+  resident
+}
+
+enum QrValidity {
+  today
+  period
+  fixed
+}
+
+enum QrUsage {
+  single
+  unlimited
+}
+
+// ===================== ÁREAS COMUNS + RESERVAS ==============================
+
+model CommonArea {
+  id             String      @id @default(uuid()) @db.Uuid
+  condominium_id String      @db.Uuid
+  condominium    Condominium @relation(fields: [condominium_id], references: [id], onDelete: Cascade)
+  name           String // "Salão de festas", "Churrasqueira", "Quadra"
+  enabled        Boolean     @default(true) // toggle do gestor (wireframe ③·6)
+  created_at     DateTime    @default(now())
+
+  reservations Reservation[]
+
+  @@unique([condominium_id, name])
+}
+
+model Reservation {
+  id             String            @id @default(uuid()) @db.Uuid
+  common_area_id String            @db.Uuid
+  common_area    CommonArea        @relation(fields: [common_area_id], references: [id], onDelete: Cascade)
+  profile_id     String            @db.Uuid // morador que reservou
+  profile        Profile           @relation(fields: [profile_id], references: [id], onDelete: Cascade)
+  starts_at      DateTime
+  ends_at        DateTime
+  status         ReservationStatus @default(confirmed)
+  created_at     DateTime          @default(now())
+
+  @@index([common_area_id, starts_at])
+  @@index([profile_id])
+}
+
+enum ReservationStatus {
+  confirmed
+  cancelled
+}
+
+// ===================== COMUNICADOS ==========================================
+
+model Announcement {
+  id             String      @id @default(uuid()) @db.Uuid
+  condominium_id String      @db.Uuid
+  condominium    Condominium @relation(fields: [condominium_id], references: [id], onDelete: Cascade)
+  author_id      String?     @db.Uuid // Profile do gestor
+  author         Profile?    @relation("AnnouncementAuthor", fields: [author_id], references: [id], onDelete: SetNull)
+
+  title    String
+  body     String
+  scope    AnnScope @default(all) // all | block
+  block_id String?  @db.Uuid // usado quando scope=block
+  block    Block?   @relation(fields: [block_id], references: [id], onDelete: Cascade)
+
+  created_at DateTime @default(now())
+
+  reads AnnouncementRead[]
+
+  @@index([condominium_id, created_at])
+}
+
+enum AnnScope {
+  all
+  block
+}
+
+model AnnouncementRead {
+  id              String       @id @default(uuid()) @db.Uuid
+  announcement_id String       @db.Uuid
+  announcement    Announcement @relation(fields: [announcement_id], references: [id], onDelete: Cascade)
+  profile_id      String       @db.Uuid
+  profile         Profile      @relation(fields: [profile_id], references: [id], onDelete: Cascade)
+  read_at         DateTime     @default(now())
+
+  // presença da linha = lido; ausência = não-lido (dot indicator do wireframe)
+  @@unique([announcement_id, profile_id])
+}
+
+// ===================== HISTÓRICO DE CHAMADAS ================================
+// Recados internos do morador (wireframe ②·5) = consultar Call com
+// status IN (missed, declined) e caller_kind = resident (sem modelo novo).
+
+model Call {
+  id             String      @id @default(uuid()) @db.Uuid
+  condominium_id String      @db.Uuid
+  condominium    Condominium @relation(fields: [condominium_id], references: [id], onDelete: Cascade)
+  unit_id        String?     @db.Uuid
+  caller_kind    CallerKind // delivery (web) ou resident (app)
+  caller_id      String?     @db.Uuid // Profile do morador, se for chamada interna
+  media          CallMedia   @default(audio) // audio | video
+  status         CallStatus  @default(ringing)
+  started_at     DateTime    @default(now())
+  answered_at    DateTime?
+  ended_at       DateTime?
+
+  @@index([condominium_id, unit_id, started_at])
+}
+
+enum CallerKind {
+  delivery
+  resident
+}
+
+enum CallMedia {
+  audio
+  video
+}
+
+enum CallStatus {
+  ringing
+  answered
+  missed
+  declined
+  ended
+}
+
+// ===================== MENSAGEM "NÃO ATENDEU" (web entregador) ==============
+
+model MissedCallMessage {
+  id             String      @id @default(uuid()) @db.Uuid
+  condominium_id String      @db.Uuid
+  condominium    Condominium @relation(fields: [condominium_id], references: [id], onDelete: Cascade)
+  unit_id        String?     @db.Uuid
+  visitor_name   String? // nome que o entregador digitou
+  reason         String? // motivo / mensagem
+  created_at     DateTime    @default(now())
+  read_at        DateTime?
+
+  @@index([condominium_id, unit_id])
+}
