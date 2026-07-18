@@ -354,22 +354,34 @@ export class CondominiumsService {
     };
   }
 
-  /** Morador entra numa unidade — cria Profile resident `pending` + vínculo. */
+  /**
+   * Entra num condomínio pelo código. Morador (`as:'resident'`) precisa escolher
+   * a unidade e vira `resident` pending; síndico (`as:'manager'`) entra como
+   * `sub_manager` pending (sem unidade) — aguardando o gestor/admin autorizar.
+   */
   async join(userId: string, condoId: string, dto: JoinDto) {
-    const unit = await this.prisma.unit.findFirst({ where: { id: dto.unit_id, condominium_id: condoId } });
-    if (!unit) throw new NotFoundException('Unidade não encontrada neste condomínio.');
+    const asManager = dto.as === 'manager';
+    const role = asManager ? 'sub_manager' : 'resident';
+
+    if (!asManager) {
+      if (!dto.unit_id) throw new BadRequestException('Escolha a unidade.');
+      const unit = await this.prisma.unit.findFirst({ where: { id: dto.unit_id, condominium_id: condoId } });
+      if (!unit) throw new NotFoundException('Unidade não encontrada neste condomínio.');
+    }
 
     const profile = await this.prisma.profile.upsert({
-      where: { user_id_condominium_id_role: { user_id: userId, condominium_id: condoId, role: 'resident' } },
+      where: { user_id_condominium_id_role: { user_id: userId, condominium_id: condoId, role } },
       update: {},
-      create: { user_id: userId, condominium_id: condoId, role: 'resident', status: 'pending' },
+      create: { user_id: userId, condominium_id: condoId, role, status: 'pending' },
     });
-    await this.prisma.unitMembership.upsert({
-      where: { profile_id_unit_id: { profile_id: profile.id, unit_id: dto.unit_id } },
-      update: {},
-      create: { profile_id: profile.id, unit_id: dto.unit_id },
-    });
-    return { profile_id: profile.id, status: profile.status };
+    if (!asManager && dto.unit_id) {
+      await this.prisma.unitMembership.upsert({
+        where: { profile_id_unit_id: { profile_id: profile.id, unit_id: dto.unit_id } },
+        update: {},
+        create: { profile_id: profile.id, unit_id: dto.unit_id },
+      });
+    }
+    return { profile_id: profile.id, status: profile.status, role };
   }
 
   private async ownedBlock(condoId: string, blockId: string) {

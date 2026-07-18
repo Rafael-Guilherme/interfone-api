@@ -271,6 +271,8 @@ model CommonArea {
   condominium    Condominium @relation(fields: [condominium_id], references: [id], onDelete: Cascade)
   name           String // "Salão de festas", "Churrasqueira", "Quadra"
   enabled        Boolean     @default(true) // toggle do gestor (wireframe ③·6)
+  capacity       Int? // capacidade de pessoas (opcional)
+  fee_cents      Int? // taxa de uso em centavos (opcional)
   created_at     DateTime    @default(now())
 
   reservations Reservation[]

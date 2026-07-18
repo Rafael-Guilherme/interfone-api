@@ -127,7 +127,11 @@ export class UnitDto {
 }
 
 export class JoinDto {
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
-  unit_id!: string;
+  unit_id?: string; // obrigatório para morador; ignorado para síndico
+
+  @IsOptional()
+  @IsIn(['resident', 'manager'])
+  as?: 'resident' | 'manager';
 }

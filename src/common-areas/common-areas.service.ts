@@ -18,14 +18,26 @@ export class CommonAreasService {
       orderBy: { name: 'asc' },
       include: { _count: { select: { reservations: true } } },
     });
-    return areas.map((a) => ({ id: a.id, name: a.name, enabled: a.enabled, reservations: a._count.reservations }));
+    return areas.map((a) => ({
+      id: a.id,
+      name: a.name,
+      enabled: a.enabled,
+      capacity: a.capacity,
+      fee_cents: a.fee_cents,
+      reservations: a._count.reservations,
+    }));
   }
 
   async create(userId: string, condoId: string, dto: CreateCommonAreaDto) {
     await this.access.assert(userId, condoId);
     return this.prisma.commonArea.create({
-      data: { condominium_id: condoId, name: dto.name },
-      select: { id: true, name: true, enabled: true },
+      data: {
+        condominium_id: condoId,
+        name: dto.name,
+        capacity: dto.capacity ?? null,
+        fee_cents: dto.fee_cents ?? null,
+      },
+      select: { id: true, name: true, enabled: true, capacity: true, fee_cents: true },
     });
   }
 
@@ -37,8 +49,10 @@ export class CommonAreasService {
       data: {
         ...(dto.name !== undefined ? { name: dto.name } : {}),
         ...(dto.enabled !== undefined ? { enabled: dto.enabled } : {}),
+        ...(dto.capacity !== undefined ? { capacity: dto.capacity } : {}),
+        ...(dto.fee_cents !== undefined ? { fee_cents: dto.fee_cents } : {}),
       },
-      select: { id: true, name: true, enabled: true },
+      select: { id: true, name: true, enabled: true, capacity: true, fee_cents: true },
     });
   }
 
