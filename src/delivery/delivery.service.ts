@@ -52,6 +52,44 @@ export class DeliveryService {
     };
   }
 
+  /**
+   * POST /q/:token/recado — "ninguém atendeu, fica o recado".
+   *
+   * O QR é a credencial, então a unidade informada precisa pertencer ao condo
+   * daquele QR; um QR de unidade só aceita recado para a própria unidade.
+   * O morador lê isso em Recados (resident.service.recados).
+   */
+  async leaveMessage(
+    token: string,
+    input: { unit_id?: string; visitor_name?: string; reason: string },
+  ) {
+    const qr = await this.resolveQr(token);
+
+    let unitId: string | null = null;
+    if (qr.unit_id) {
+      // QR preso a uma unidade: ignora o que veio do cliente e usa a do QR.
+      unitId = qr.unit_id;
+    } else if (input.unit_id) {
+      const unit = await this.prisma.unit.findFirst({
+        where: { id: input.unit_id, condominium_id: qr.condominium.id },
+        select: { id: true },
+      });
+      if (!unit) throw new NotFoundException('Unidade inválida.');
+      unitId = unit.id;
+    }
+
+    const msg = await this.prisma.missedCallMessage.create({
+      data: {
+        condominium_id: qr.condominium.id,
+        unit_id: unitId,
+        visitor_name: input.visitor_name?.trim() || null,
+        reason: input.reason.trim(),
+      },
+      select: { id: true, created_at: true },
+    });
+    return { ok: true, id: msg.id, created_at: msg.created_at };
+  }
+
   private unitLabel(u: { id: string; number: string; block: { name: string } | null }) {
     return { id: u.id, label: u.block ? `Bloco ${u.block.name} · ${u.number}` : u.number };
   }

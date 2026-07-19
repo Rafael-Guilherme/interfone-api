@@ -1,5 +1,6 @@
-import { Controller, Get, Param } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post } from '@nestjs/common';
 import { DeliveryService } from './delivery.service';
+import { LeaveMessageDto } from './dto';
 
 /** Web do entregador — PÚBLICA (sem @UseGuards). O :token do QR é a credencial. */
 @Controller('q')
@@ -9,5 +10,10 @@ export class DeliveryController {
   @Get(':token')
   resolve(@Param('token') token: string) {
     return this.service.resolve(token);
+  }
+
+  @Post(':token/recado')
+  leaveMessage(@Param('token') token: string, @Body() body: LeaveMessageDto) {
+    return this.service.leaveMessage(token, body);
   }
 }

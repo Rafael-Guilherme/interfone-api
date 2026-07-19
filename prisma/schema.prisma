@@ -211,6 +211,7 @@ model UnitMembership {
   profile    Profile  @relation(fields: [profile_id], references: [id], onDelete: Cascade)
   unit_id    String   @db.Uuid
   unit       Unit     @relation(fields: [unit_id], references: [id], onDelete: Cascade)
+  call_order Int      @default(0) // ordem do transbordo; empate resolve por created_at
   created_at DateTime @default(now())
 
   @@unique([profile_id, unit_id])

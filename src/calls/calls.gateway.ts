@@ -17,8 +17,13 @@ import { DeliveryService } from '../delivery/delivery.service';
  * Signaling do fluxo web (entregador) ↔ app (morador), respaldado no Postgres.
  *
  *   ringing ──answer──▶ answered ──end──▶ ended
- *      │  └────decline──▶ declined
- *      └───────timeout(45s)──▶ missed
+ *      │
+ *      ├─ decline/timeout na etapa ──▶ próximo da fila (transbordo)
+ *      └─ fila esgotada ──▶ declined (todos recusaram) | missed (ninguém atendeu)
+ *
+ * O toque é sequencial: um morador por vez, na ordem de `call_order`, cada um
+ * com RING_STEP_TIMEOUT_MS. Por isso o `call:incoming` vai para `user:<id>` e
+ * não para `unit:<id>`.
  *
  * Identidade no handshake:
  *   morador   → auth.role='resident' + auth.token (JWT). Entra nas salas das suas unidades.
@@ -27,7 +32,12 @@ import { DeliveryService } from '../delivery/delivery.service';
  * A mídia A/V trafega no LiveKit (grant emitido aqui); a sinalização só coordena
  * estado. O mapa `rt` guarda o roteamento efêmero de socket por chamada.
  */
-const RING_TIMEOUT_MS = 45_000;
+/**
+ * Transbordo: cada morador da unidade toca por sua vez, na ordem de
+ * `UnitMembership.call_order` (empate = mais antigo primeiro). Sem resposta na
+ * etapa, passa ao próximo; fila esgotada → missed.
+ */
+const RING_STEP_MS = Number(process.env.RING_STEP_TIMEOUT_MS ?? 20_000);
 
 type CallMedia = 'audio' | 'video';
 
@@ -35,6 +45,13 @@ interface RuntimeCall {
   callerSocketId: string;
   unitId: string;
   room: string;
+  /** user_ids na ordem do transbordo. */
+  queue: string[];
+  /** índice do morador que está tocando agora. */
+  stage: number;
+  media: CallMedia;
+  /** user_id de quem atendeu, uma vez atendida. */
+  answeredBy?: string;
   timer?: NodeJS.Timeout;
 }
 
@@ -106,16 +123,18 @@ export class CallsGateway implements OnGatewayConnection {
     });
     if (!unit) return { ok: false, error: 'Unidade inválida.' };
 
-    const targets = await this.prisma.profile.findMany({
+    // Fila do transbordo: ordenada por call_order e, no empate, por antiguidade.
+    const memberships = await this.prisma.unitMembership.findMany({
       where: {
-        condominium_id: condoId,
-        status: 'active',
-        role: 'resident',
-        unit_memberships: { some: { unit_id: body.unitId } },
+        unit_id: body.unitId,
+        profile: { condominium_id: condoId, status: 'active', role: 'resident' },
       },
-      select: { user_id: true },
+      orderBy: [{ call_order: 'asc' }, { created_at: 'asc' }],
+      select: { profile: { select: { user_id: true } } },
     });
-    if (targets.length === 0) return { ok: false, error: 'Nenhum morador disponível nesta unidade.' };
+    // Dedup preservando a ordem (um usuário pode ter mais de um perfil na unidade).
+    const queue = [...new Set(memberships.map((m) => m.profile.user_id))];
+    if (queue.length === 0) return { ok: false, error: 'Nenhum morador disponível nesta unidade.' };
 
     const media: CallMedia = body.media === 'video' ? 'video' : 'audio';
     const call = await this.prisma.call.create({
@@ -128,20 +147,21 @@ export class CallsGateway implements OnGatewayConnection {
       },
     });
     const room = `call:${call.id}`;
-    const unitRoom = `unit:${body.unitId}`;
 
-    const timer = setTimeout(() => void this.expire(call.id), RING_TIMEOUT_MS);
-    this.rt.set(call.id, { callerSocketId: client.id, unitId: body.unitId, room, timer });
-
-    this.server.to(unitRoom).emit('call:incoming', {
-      callId: call.id,
-      caller: 'Entregador na portaria',
-      media,
+    this.rt.set(call.id, {
+      callerSocketId: client.id,
+      unitId: body.unitId,
       room,
+      queue,
+      stage: 0,
+      media,
     });
+    this.ringStage(call.id);
 
-    const online = this.server.adapter.rooms.get(unitRoom)?.size ?? 0;
-    this.logger.log(`call ${call.id} ringing unit=${body.unitId} targets=${targets.length} online=${online}`);
+    const online = queue.filter((uid) => (this.server.adapter.rooms.get(`user:${uid}`)?.size ?? 0) > 0).length;
+    this.logger.log(
+      `call ${call.id} ringing unit=${body.unitId} fila=${queue.length} online=${online} etapa=1`,
+    );
 
     const grant = await this.livekit.issueGrant({
       room,
@@ -160,16 +180,23 @@ export class CallsGateway implements OnGatewayConnection {
     const call = await this.prisma.call.findUnique({ where: { id: body.callId } });
     if (!call || call.status !== 'ringing') return { ok: false, error: 'estado inválido' };
 
+    const runtime = this.rt.get(call.id);
+    // Com transbordo, só o morador da etapa atual pode atender — sem isso,
+    // qualquer morador da unidade poderia sequestrar uma chamada que não é dele.
+    if (runtime && runtime.queue[runtime.stage] !== client.data.userId) {
+      return { ok: false, error: 'não é a sua vez nesta chamada' };
+    }
+
     await this.prisma.call.update({
       where: { id: call.id },
       data: { status: 'answered', answered_at: new Date() },
     });
-    const runtime = this.rt.get(call.id);
     this.clearTimer(call.id);
+    if (runtime) runtime.answeredBy = client.data.userId as string;
 
     if (runtime) this.server.to(runtime.callerSocketId).emit('call:answered', { callId: call.id });
-    // Outros devices da unidade param de tocar.
-    client.to(`unit:${call.unit_id}`).emit('call:cancelled', { callId: call.id });
+    // Outros devices do MESMO morador param de tocar.
+    client.to(`user:${client.data.userId}`).emit('call:cancelled', { callId: call.id });
 
     this.logger.log(`call ${call.id} answered by ${client.data.userId}`);
     const grant = await this.livekit.issueGrant({
@@ -181,16 +208,19 @@ export class CallsGateway implements OnGatewayConnection {
     return { ok: true, grant };
   }
 
-  /** Morador recusa. */
+  /**
+   * Morador recusa. Numa fila de transbordo, recusar é "passa para o próximo",
+   * não "derruba a chamada" — o entregador só recebe `call:declined` quando
+   * todos da fila recusaram.
+   */
   @SubscribeMessage('call:decline')
-  async onDecline(@MessageBody() body: { callId: string }) {
+  async onDecline(@ConnectedSocket() client: Socket, @MessageBody() body: { callId: string }) {
+    await this.ready(client);
     const rt = this.rt.get(body.callId);
-    const call = await this.transitionEnded(body.callId, 'declined');
-    if (!call) return { ok: false };
-    if (rt) this.server.to(rt.callerSocketId).emit('call:declined', { callId: call.id });
-    this.server.to(`unit:${call.unit_id}`).emit('call:cancelled', { callId: call.id });
-    this.rt.delete(call.id);
-    this.logger.log(`call ${call.id} declined`);
+    if (!rt) return { ok: false };
+    if (rt.queue[rt.stage] !== client.data?.userId) return { ok: false, error: 'não é a sua vez' };
+    this.logger.log(`call ${body.callId} recusada na etapa ${rt.stage + 1}/${rt.queue.length}`);
+    await this.advance(body.callId, 'declined');
     return { ok: true };
   }
 
@@ -203,23 +233,70 @@ export class CallsGateway implements OnGatewayConnection {
     const rt = this.rt.get(body.callId);
     const call = await this.transitionEnded(body.callId, next);
     if (!call) return { ok: false };
-    if (rt) this.server.to(rt.callerSocketId).emit('call:ended', { callId: call.id });
-    this.server.to(`unit:${call.unit_id}`).emit('call:ended', { callId: call.id });
-    this.rt.delete(call.id);
+    if (rt) {
+      this.server.to(rt.callerSocketId).emit('call:ended', { callId: call.id });
+      // Avisa quem atendeu ou, se ainda tocava, quem estava tocando na etapa.
+      const target = rt.answeredBy ?? rt.queue[rt.stage];
+      if (target) this.server.to(`user:${target}`).emit('call:ended', { callId: call.id });
+      this.rt.delete(call.id);
+    }
     this.logger.log(`call ${call.id} ${next}`);
     return { ok: true };
   }
 
   // ----------------------------------------------------------------
 
-  private async expire(callId: string) {
+  /**
+   * Toca no morador da etapa atual e arma o timer que passa ao próximo.
+   * Só o morador da vez recebe `call:incoming` — daí a sala ser `user:<id>`
+   * e não `unit:<id>`.
+   */
+  private ringStage(callId: string) {
     const rt = this.rt.get(callId);
-    const call = await this.transitionEnded(callId, 'missed', 'ringing');
-    if (!call) return;
-    if (rt) this.server.to(rt.callerSocketId).emit('call:missed', { callId });
-    this.server.to(`unit:${call.unit_id}`).emit('call:cancelled', { callId });
+    if (!rt) return;
+    const userId = rt.queue[rt.stage];
+    if (!userId) return;
+
+    this.server.to(`user:${userId}`).emit('call:incoming', {
+      callId,
+      caller: 'Entregador na portaria',
+      media: rt.media,
+      room: rt.room,
+      stage: rt.stage + 1,
+      stages: rt.queue.length,
+    });
+    rt.timer = setTimeout(() => void this.advance(callId), RING_STEP_MS);
+  }
+
+  /**
+   * Encerra a etapa atual e vai para o próximo da fila; se acabou a fila,
+   * a chamada vira `missed`. `reason` só muda o desfecho quando a fila esgota:
+   * recusa explícita de todos → `declined`; ninguém atendeu → `missed`.
+   */
+  private async advance(callId: string, reason: 'timeout' | 'declined' = 'timeout') {
+    const rt = this.rt.get(callId);
+    if (!rt) return;
+    this.clearTimer(callId);
+
+    // Para o toque no morador da etapa que está saindo (todos os devices dele).
+    const leaving = rt.queue[rt.stage];
+    if (leaving) this.server.to(`user:${leaving}`).emit('call:cancelled', { callId });
+
+    rt.stage += 1;
+    if (rt.stage < rt.queue.length) {
+      this.logger.log(`call ${callId} transbordo → etapa ${rt.stage + 1}/${rt.queue.length} (${reason})`);
+      this.ringStage(callId);
+      return;
+    }
+
+    // Fila esgotada.
+    const next = reason === 'declined' ? 'declined' : 'missed';
+    const call = await this.transitionEnded(callId, next, 'ringing');
+    if (call) {
+      this.server.to(rt.callerSocketId).emit(next === 'declined' ? 'call:declined' : 'call:missed', { callId });
+      this.logger.log(`call ${callId} ${next} (fila de ${rt.queue.length} esgotada)`);
+    }
     this.rt.delete(callId);
-    this.logger.log(`call ${callId} missed (timeout)`);
   }
 
   /**

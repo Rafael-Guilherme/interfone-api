@@ -8,6 +8,7 @@ import { CondominiumsModule } from './condominiums/condominiums.module';
 import { AnnouncementsModule } from './announcements/announcements.module';
 import { CommonAreasModule } from './common-areas/common-areas.module';
 import { QrCodesModule } from './qrcodes/qrcodes.module';
+import { ResidentModule } from './resident/resident.module';
 import { DeliveryModule } from './delivery/delivery.module';
 import { CallsModule } from './calls/calls.module';
 import { HealthController } from './health.controller';
@@ -37,6 +38,7 @@ import { HealthController } from './health.controller';
     AnnouncementsModule,
     CommonAreasModule,
     QrCodesModule,
+    ResidentModule,
     DeliveryModule,
     CallsModule,
   ],
