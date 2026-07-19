@@ -128,6 +128,26 @@ model Condominium {
   messages     MissedCallMessage[]
   common_areas CommonArea[]
   announcements Announcement[]
+  packages     Package[]
+  internal_contacts InternalContact[]
+}
+
+/// Contato interno do condomínio (portaria, zelador, administração, ramal do
+/// salão…). O morador liga por telefone/ramal — comunicação interna do
+/// wireframe DEFM·4. Cadastrado pelo síndico.
+model InternalContact {
+  id             String      @id @default(uuid()) @db.Uuid
+  condominium_id String      @db.Uuid
+  condominium    Condominium @relation(fields: [condominium_id], references: [id], onDelete: Cascade)
+  name           String // "Portaria", "Zelador", "Administração"
+  phone          String // ramal ou telefone; o app decide como discar
+  note           String? // "8h–18h", "emergências"
+  display_order  Int         @default(0)
+  enabled        Boolean     @default(true)
+  created_at     DateTime    @default(now())
+  updated_at     DateTime    @updatedAt
+
+  @@index([condominium_id, enabled])
 }
 
 enum CondoStatus {
@@ -160,6 +180,7 @@ model Unit {
 
   memberships UnitMembership[]
   qr_codes    QrCode[]
+  packages    Package[]
 
   @@unique([condominium_id, block_id, number])
 }
@@ -174,6 +195,9 @@ model Profile {
   condominium    Condominium   @relation(fields: [condominium_id], references: [id], onDelete: Cascade)
   role           ProfileRole   @default(resident)
   status         ProfileStatus @default(pending) // pending até o gestor aprovar
+  // Permissões granulares do sub-gestor. Vazio = sem acesso a nada além de ver
+  // o painel. Ignorado para role=manager, que tem tudo por definição.
+  permissions    String[]      @default([])
   approved_by_id String?       @db.Uuid
   approved_at    DateTime?
   created_at     DateTime      @default(now())
@@ -212,6 +236,7 @@ model UnitMembership {
   unit_id    String   @db.Uuid
   unit       Unit     @relation(fields: [unit_id], references: [id], onDelete: Cascade)
   call_order Int      @default(0) // ordem do transbordo; empate resolve por created_at
+  in_queue   Boolean  @default(true) // participa do toque? o 1º morador da unidade decide
   created_at DateTime @default(now())
 
   @@unique([profile_id, unit_id])
@@ -274,11 +299,30 @@ model CommonArea {
   enabled        Boolean     @default(true) // toggle do gestor (wireframe ③·6)
   capacity       Int? // capacidade de pessoas (opcional)
   fee_cents      Int? // taxa de uso em centavos (opcional)
+  // Janela de agendamento: quantos dias à frente o morador pode reservar.
+  // null = sem limite.
+  max_days_ahead Int?
   created_at     DateTime    @default(now())
 
   reservations Reservation[]
+  blocks       AreaBlock[]
 
   @@unique([condominium_id, name])
+}
+
+/// Dia em que a área fica indisponível por decisão da administração (cinza no
+/// calendário). É diferente de "ocupado pela administração", que é uma
+/// Reservation feita por um perfil de gestor (azul).
+model AreaBlock {
+  id             String     @id @default(uuid()) @db.Uuid
+  common_area_id String     @db.Uuid
+  common_area    CommonArea @relation(fields: [common_area_id], references: [id], onDelete: Cascade)
+  day            DateTime   @db.Date
+  reason         String?
+  created_at     DateTime   @default(now())
+
+  @@unique([common_area_id, day])
+  @@index([common_area_id, day])
 }
 
 model Reservation {
@@ -297,8 +341,9 @@ model Reservation {
 }
 
 enum ReservationStatus {
-  confirmed
-  cancelled
+  pending // solicitada pelo morador, aguardando o gestor
+  confirmed // aprovada (ou feita pela própria administração)
+  cancelled // recusada pelo gestor ou cancelada
 }
 
 // ===================== COMUNICADOS ==========================================
@@ -376,6 +421,32 @@ enum CallStatus {
   missed
   declined
   ended
+}
+
+// ===================== ENCOMENDAS (portaria → morador) ======================
+
+model Package {
+  id             String        @id @default(uuid()) @db.Uuid
+  condominium_id String        @db.Uuid
+  condominium    Condominium   @relation(fields: [condominium_id], references: [id], onDelete: Cascade)
+  unit_id        String        @db.Uuid
+  unit           Unit          @relation(fields: [unit_id], references: [id], onDelete: Cascade)
+  description    String // "caixa média", "envelope", etc.
+  recipient      String? // nome de quem vai receber (a unidade pode ter vários moradores)
+  carrier        String? // transportadora / remetente
+  registered_by  String?       @db.Uuid // Profile do gestor que registrou
+  status         PackageStatus @default(waiting)
+  received_at    DateTime      @default(now())
+  picked_up_at   DateTime?
+  picked_up_note String? // quem retirou, se anotado na portaria
+
+  @@index([condominium_id, status])
+  @@index([unit_id, status])
+}
+
+enum PackageStatus {
+  waiting
+  picked_up
 }
 
 // ===================== MENSAGEM "NÃO ATENDEU" (web entregador) ==============

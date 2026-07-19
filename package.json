@@ -11,7 +11,8 @@
     "prisma:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:seed": "ts-node prisma/seed.ts",
-    "approve": "ts-node prisma/approve.ts"
+    "approve": "ts-node prisma/approve.ts",
+    "make-admin": "ts-node prisma/make-admin.ts"
   },
   "prisma": {
     "seed": "ts-node prisma/seed.ts"
@@ -23,11 +24,16 @@
     "@nestjs/jwt": "^10.2.0",
     "@nestjs/platform-express": "^10.4.15",
     "@nestjs/platform-socket.io": "^10.4.15",
+    "@nestjs/throttler": "^6.5.0",
     "@nestjs/websockets": "^10.4.15",
     "@prisma/client": "^5.22.0",
+    "@types/pdfkit": "^0.17.6",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.1",
+    "helmet": "^8.3.0",
     "livekit-server-sdk": "^2.9.2",
+    "nodemailer": "^9.0.3",
+    "pdfkit": "^0.19.1",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
     "socket.io": "^4.8.1"
@@ -36,6 +42,7 @@
     "@nestjs/cli": "^10.4.9",
     "@nestjs/schematics": "^10.2.3",
     "@types/node": "^22.10.2",
+    "@types/nodemailer": "^8.0.1",
     "prisma": "^5.22.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.7.2"

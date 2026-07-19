@@ -6,11 +6,22 @@ import {
   createParamDecorator,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
+import { PrismaService } from '../prisma/prisma.service';
 
-/** Exige `Authorization: Bearer <access>` e injeta `req.user = { userId }`. */
+/**
+ * Exige `Authorization: Bearer <access>` e injeta `req.user = { userId }`.
+ *
+ * Confere o status do usuário no banco a cada request: sem isso, bloquear
+ * alguém pelo painel não teria efeito nenhum até o JWT (7 dias) expirar — o
+ * token continuaria valendo. É uma leitura por PK, barata; quando os refresh
+ * tokens curtos existirem dá para reavaliar.
+ */
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
-  constructor(private readonly jwt: JwtService) {}
+  constructor(
+    private readonly jwt: JwtService,
+    private readonly prisma: PrismaService,
+  ) {}
 
   async canActivate(ctx: ExecutionContext): Promise<boolean> {
     const req = ctx.switchToHttp().getRequest();
@@ -19,13 +30,24 @@ export class JwtAuthGuard implements CanActivate {
     if (scheme !== 'Bearer' || !token) {
       throw new UnauthorizedException('Token ausente.');
     }
+
+    let payload: { sub: string; email?: string };
     try {
-      const payload = await this.jwt.verifyAsync(token);
-      req.user = { userId: payload.sub, email: payload.email };
-      return true;
+      payload = await this.jwt.verifyAsync(token);
     } catch {
       throw new UnauthorizedException('Token inválido.');
     }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: payload.sub },
+      select: { status: true },
+    });
+    if (!user || user.status !== 'active') {
+      throw new UnauthorizedException('Conta bloqueada ou inexistente.');
+    }
+
+    req.user = { userId: payload.sub, email: payload.email };
+    return true;
   }
 }
 

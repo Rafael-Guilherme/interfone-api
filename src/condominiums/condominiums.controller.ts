@@ -15,6 +15,8 @@ import {
   BlockDto,
   CreateCondominiumDto,
   JoinDto,
+  ManagerActionDto,
+  ManagerPermissionsDto,
   ResidentActionDto,
   UnitDto,
   UpdateCondominiumDto,
@@ -62,6 +64,32 @@ export class CondominiumsController {
     @Query('status') status?: string,
   ) {
     return this.service.listResidents(userId, id, status);
+  }
+
+  // ---- sub-gestores ----
+  @Get(':id/managers')
+  listManagers(@CurrentUserId() userId: string, @Param('id', ParseUUIDPipe) id: string) {
+    return this.service.listManagers(userId, id);
+  }
+
+  @Patch(':id/managers/:pid/permissions')
+  setManagerPermissions(
+    @CurrentUserId() userId: string,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('pid', ParseUUIDPipe) pid: string,
+    @Body() dto: ManagerPermissionsDto,
+  ) {
+    return this.service.setManagerPermissions(userId, id, pid, dto.permissions);
+  }
+
+  @Patch(':id/managers/:pid')
+  setManagerStatus(
+    @CurrentUserId() userId: string,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('pid', ParseUUIDPipe) pid: string,
+    @Body() dto: ManagerActionDto,
+  ) {
+    return this.service.setManagerStatus(userId, id, pid, dto.action);
   }
 
   @Patch(':id/residents/:pid')

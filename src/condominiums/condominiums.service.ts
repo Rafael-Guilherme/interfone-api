@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
-import { ManagerAccess } from './manager-access.service';
+import { ManagerAccess, PERMISSOES } from './manager-access.service';
 import {
   BlockDto,
   CreateCondominiumDto,
@@ -189,7 +189,7 @@ export class CondominiumsService {
         ...(status ? { status: status as any } : {}),
       },
       include: {
-        user: { select: { name: true, email: true } },
+        user: { select: { name: true, email: true, phone: true } },
         unit_memberships: { include: { unit: { include: { block: { select: { name: true } } } } } },
       },
       orderBy: { created_at: 'asc' },
@@ -199,6 +199,7 @@ export class CondominiumsService {
       profile_id: p.id,
       name: p.user.name,
       email: p.user.email,
+      phone: p.user.phone, // usado no deep link de WhatsApp da tela de moradores
       status: p.status,
       units: p.unit_memberships.map((m) =>
         m.unit.block ? `Bloco ${m.unit.block.name} · ${m.unit.number}` : m.unit.number,
@@ -206,9 +207,79 @@ export class CondominiumsService {
     }));
   }
 
+  // ---- sub-gestores (multigestor) ----
+
+  /** Lista os gestores do condo com suas permissões. Exige o titular. */
+  async listManagers(userId: string, condoId: string) {
+    const me = await this.access.assertOwner(userId, condoId);
+    const rows = await this.prisma.profile.findMany({
+      where: { condominium_id: condoId, role: { in: ['manager', 'sub_manager'] } },
+      include: { user: { select: { name: true, email: true, phone: true } } },
+      orderBy: [{ role: 'asc' }, { created_at: 'asc' }],
+    });
+    return rows.map((p) => ({
+      profile_id: p.id,
+      name: p.user.name,
+      email: p.user.email,
+      phone: p.user.phone,
+      role: p.role,
+      status: p.status,
+      permissions: p.role === 'manager' ? PERMISSOES.slice() : p.permissions,
+      is_me: p.id === me.id,
+    }));
+  }
+
+  /**
+   * Define as permissões de um sub-gestor. Só o titular pode chamar, e o alvo
+   * precisa ser sub_manager — trocar as permissões de um titular não faz
+   * sentido (ele tem todas por definição).
+   */
+  async setManagerPermissions(userId: string, condoId: string, profileId: string, permissions: string[]) {
+    await this.access.assertOwner(userId, condoId);
+    const alvo = await this.prisma.profile.findFirst({
+      where: { id: profileId, condominium_id: condoId, role: 'sub_manager' },
+    });
+    if (!alvo) throw new NotFoundException('Sub-gestor não encontrado.');
+
+    const validas = permissions.filter((p) => (PERMISSOES as readonly string[]).includes(p));
+    await this.prisma.profile.update({
+      where: { id: alvo.id },
+      data: { permissions: validas },
+    });
+    return { ok: true, permissions: validas };
+  }
+
+  /** Aprova, rejeita ou remove um sub-gestor. Só o titular. */
+  async setManagerStatus(
+    userId: string,
+    condoId: string,
+    profileId: string,
+    action: 'approve' | 'reject' | 'remove',
+  ) {
+    await this.access.assertOwner(userId, condoId);
+    const alvo = await this.prisma.profile.findFirst({
+      where: { id: profileId, condominium_id: condoId, role: 'sub_manager' },
+    });
+    if (!alvo) throw new NotFoundException('Sub-gestor não encontrado.');
+
+    if (action === 'remove') {
+      await this.prisma.profile.delete({ where: { id: alvo.id } });
+      return { ok: true, action };
+    }
+    await this.prisma.profile.update({
+      where: { id: alvo.id },
+      data: {
+        status: action === 'approve' ? 'active' : 'blocked',
+        approved_at: new Date(),
+        approved_by_id: userId,
+      },
+    });
+    return { ok: true, action };
+  }
+
   /** Aprova (active) ou rejeita (blocked) um morador pendente. */
   async setResidentStatus(userId: string, condoId: string, profileId: string, action: 'approve' | 'reject') {
-    await this.access.assert(userId, condoId);
+    await this.access.assert(userId, condoId, 'residents');
     const profile = await this.prisma.profile.findFirst({
       where: { id: profileId, condominium_id: condoId, role: 'resident' },
     });
@@ -228,7 +299,7 @@ export class CondominiumsService {
 
   /** Atualiza dados do interfone (nome, foto, endereço, geo). */
   async update(userId: string, condoId: string, dto: UpdateCondominiumDto) {
-    await this.access.assert(userId, condoId);
+    await this.access.assert(userId, condoId, 'settings');
     return this.prisma.condominium.update({
       where: { id: condoId },
       data: {
@@ -281,18 +352,18 @@ export class CondominiumsService {
   }
 
   async createBlock(userId: string, condoId: string, dto: BlockDto) {
-    await this.access.assert(userId, condoId);
+    await this.access.assertOwner(userId, condoId); // só o gestor titular altera a estrutura
     return this.prisma.block.create({ data: { condominium_id: condoId, name: dto.name }, select: { id: true, name: true } });
   }
 
   async updateBlock(userId: string, condoId: string, blockId: string, dto: BlockDto) {
-    await this.access.assert(userId, condoId);
+    await this.access.assertOwner(userId, condoId); // só o gestor titular altera a estrutura
     await this.ownedBlock(condoId, blockId);
     return this.prisma.block.update({ where: { id: blockId }, data: { name: dto.name }, select: { id: true, name: true } });
   }
 
   async deleteBlock(userId: string, condoId: string, blockId: string) {
-    await this.access.assert(userId, condoId);
+    await this.access.assertOwner(userId, condoId); // só o gestor titular altera a estrutura
     await this.ownedBlock(condoId, blockId);
     const residents = await this.prisma.unitMembership.count({ where: { unit: { block_id: blockId } } });
     if (residents > 0) {
@@ -303,7 +374,7 @@ export class CondominiumsService {
   }
 
   async createUnit(userId: string, condoId: string, dto: UnitDto) {
-    await this.access.assert(userId, condoId);
+    await this.access.assertOwner(userId, condoId); // só o gestor titular altera a estrutura
     if (dto.block_id) await this.ownedBlock(condoId, dto.block_id);
     return this.prisma.unit.create({
       data: { condominium_id: condoId, block_id: dto.block_id ?? null, number: dto.number },
@@ -312,7 +383,7 @@ export class CondominiumsService {
   }
 
   async updateUnit(userId: string, condoId: string, unitId: string, dto: UnitDto) {
-    await this.access.assert(userId, condoId);
+    await this.access.assertOwner(userId, condoId); // só o gestor titular altera a estrutura
     await this.ownedUnit(condoId, unitId);
     if (dto.block_id) await this.ownedBlock(condoId, dto.block_id);
     return this.prisma.unit.update({
@@ -323,7 +394,7 @@ export class CondominiumsService {
   }
 
   async deleteUnit(userId: string, condoId: string, unitId: string) {
-    await this.access.assert(userId, condoId);
+    await this.access.assertOwner(userId, condoId); // só o gestor titular altera a estrutura
     await this.ownedUnit(condoId, unitId);
     const residents = await this.prisma.unitMembership.count({ where: { unit_id: unitId } });
     if (residents > 0) {

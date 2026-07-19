@@ -1,4 +1,20 @@
-import { IsOptional, IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
+import { Type } from 'class-transformer';
+import { IsLatitude, IsLongitude, IsNumber, IsOptional, IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
+
+/** Posição do visitante, vinda do navegador na query de GET /q/:token. */
+export class ResolveQuery {
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @IsLatitude()
+  lat?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @IsLongitude()
+  lng?: number;
+}
 
 /**
  * Recado deixado pelo entregador quando ninguém atende. Endpoint público

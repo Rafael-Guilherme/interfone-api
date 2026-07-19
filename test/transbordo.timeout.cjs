@@ -35,7 +35,9 @@ function resident(token, name) {
 (async () => {
   const ana = resident(await jwtFor('ana@demo.test'), 'ana');
   const bruno = resident(await jwtFor('bruno@demo.test'), 'bruno');
-  const delivery = io(`${API}/calls`, { transports: ['websocket'], auth: { role: 'delivery', qrToken: 'demo' } });
+  // O condo demo tem cerca virtual: o entregador precisa do passe de geo.
+  const geo = await fetch(`${API}/q/demo?lat=-23.5510&lng=-46.6333`).then((r) => r.json());
+  const delivery = io(`${API}/calls`, { transports: ['websocket'], auth: { role: 'delivery', qrToken: 'demo', geoPass: geo.geo_pass } });
   delivery.on('call:missed', () => { delivery.missed = true; log('     ⏱  entregador: NÃO ATENDIDA'); });
   delivery.on('call:declined', () => { delivery.declined = true; });
   await wait(1500);

@@ -1,15 +1,25 @@
-import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import {
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { createHash, randomInt } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
+import { MailService } from '../mail/mail.service';
 
 /**
  * Auth passwordless por OTP de e-mail (PLANEJAMENTO: sem senha).
  *
- * Sem provedor de e-mail configurado (MAIL_API_KEY placeholder), o código é
- * logado no servidor e — só fora de produção — devolvido em `devCode` para
- * facilitar o teste no app. Em produção isso é removido e o envio vai por Brevo.
+ * O envio real é feito pelo Resend (`MailService`). Fora de produção, quando
+ * não há chave configurada, o código também volta em `devCode` para facilitar
+ * o teste; em produção, um envio que falha derruba a requisição em vez de
+ * responder "enviado" para um e-mail que nunca chegou.
  */
+/** Tentativas erradas antes de queimar o código. */
+const MAX_TENTATIVAS_OTP = 5;
+
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
@@ -18,6 +28,7 @@ export class AuthService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
+    private readonly mail: MailService,
   ) {}
 
   private hashCode(code: string) {
@@ -26,10 +37,24 @@ export class AuthService {
   }
 
   async requestOtp(email: string, name?: string) {
+    // Usuário bloqueado/removido não recebe código — senão o bloqueio do admin
+    // seria contornável só pedindo um OTP novo.
+    const existing = await this.prisma.user.findUnique({ where: { email } });
+    if (existing && existing.status !== 'active') {
+      throw new UnauthorizedException('Esta conta está bloqueada.');
+    }
+
     const user = await this.prisma.user.upsert({
       where: { email },
       update: name ? { name } : {},
       create: { email, name: name ?? 'Morador', status: 'active' },
+    });
+
+    // Invalida códigos anteriores: manter vários válidos ao mesmo tempo
+    // multiplica as chances de acerto de quem estiver tentando adivinhar.
+    await this.prisma.otpCode.updateMany({
+      where: { destination: email, purpose: 'login', used_at: null },
+      data: { used_at: new Date() },
     });
 
     const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
@@ -43,13 +68,25 @@ export class AuthService {
       },
     });
 
-    this.logger.log(`OTP para ${email}: ${code} (expira em 10 min)`);
-    return { sent: true, ...(this.isProd ? {} : { devCode: code }) };
+    const envio = await this.mail.sendOtp(email, code);
+
+    // Em produção não existe devCode; se o e-mail não saiu, o usuário ficaria
+    // sem nenhuma forma de entrar — melhor falhar visivelmente.
+    if (this.isProd && !envio.sent) {
+      this.logger.error(`OTP não entregue para ${email}: ${envio.error}`);
+      throw new InternalServerErrorException('Não foi possível enviar o código. Tente novamente.');
+    }
+
+    return {
+      sent: envio.sent,
+      ...(this.isProd ? {} : { devCode: code }),
+    };
   }
 
   async verifyOtp(email: string, code: string) {
     const user = await this.prisma.user.findUnique({ where: { email } });
     if (!user) throw new UnauthorizedException('Código inválido.');
+    if (user.status !== 'active') throw new UnauthorizedException('Esta conta está bloqueada.');
 
     const otp = await this.prisma.otpCode.findFirst({
       where: {
@@ -60,6 +97,18 @@ export class AuthService {
       },
       orderBy: { created_at: 'desc' },
     });
+
+    // Sem este limite, um código de 6 dígitos é adivinhável por força bruta:
+    // são só 1 milhão de combinações e o código vale 10 minutos.
+    if (otp && otp.attempts >= MAX_TENTATIVAS_OTP) {
+      await this.prisma.otpCode.update({
+        where: { id: otp.id },
+        data: { used_at: new Date() }, // queima o código
+      });
+      this.logger.warn(`OTP bloqueado por excesso de tentativas: ${email}`);
+      throw new UnauthorizedException('Muitas tentativas. Peça um novo código.');
+    }
+
     if (!otp || otp.code_hash !== this.hashCode(code)) {
       if (otp) {
         await this.prisma.otpCode.update({
@@ -124,6 +173,10 @@ export class AuthService {
       id: p.id,
       role: p.role,
       status: p.status,
+      // O app precisa disto para não oferecer ao sub-gestor botões que a API
+      // vai recusar. Para `manager` a lista vem vazia no banco, mas ele tem
+      // tudo — o cliente trata `role === 'manager'` como acesso total.
+      permissions: p.permissions,
       condominium: p.condominium,
       units: p.unit_memberships.map((m) => ({
         id: m.unit.id,

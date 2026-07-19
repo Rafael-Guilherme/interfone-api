@@ -6,5 +6,6 @@ import { ResidentAccess } from './resident-access.service';
 @Module({
   controllers: [ResidentController],
   providers: [ResidentService, ResidentAccess],
+  exports: [ResidentAccess], // reusado por packages (lado do morador)
 })
 export class ResidentModule {}

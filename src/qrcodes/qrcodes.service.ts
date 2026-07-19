@@ -31,7 +31,7 @@ export class QrCodesService {
   }
 
   async create(userId: string, condoId: string, dto: CreateQrDto) {
-    await this.access.assert(userId, condoId);
+    await this.access.assert(userId, condoId, 'qrcodes');
     if (dto.unit_id) {
       const unit = await this.prisma.unit.findFirst({ where: { id: dto.unit_id, condominium_id: condoId }, select: { id: true } });
       if (!unit) throw new NotFoundException('Unidade não encontrada neste condomínio.');
@@ -51,7 +51,7 @@ export class QrCodesService {
   }
 
   async update(userId: string, condoId: string, qrId: string, dto: UpdateQrDto) {
-    await this.access.assert(userId, condoId);
+    await this.access.assert(userId, condoId, 'qrcodes');
     await this.owned(condoId, qrId);
     return this.prisma.qrCode.update({
       where: { id: qrId },
@@ -64,7 +64,7 @@ export class QrCodesService {
   }
 
   async remove(userId: string, condoId: string, qrId: string) {
-    await this.access.assert(userId, condoId);
+    await this.access.assert(userId, condoId, 'qrcodes');
     await this.owned(condoId, qrId);
     await this.prisma.qrCode.delete({ where: { id: qrId } });
     return { ok: true };

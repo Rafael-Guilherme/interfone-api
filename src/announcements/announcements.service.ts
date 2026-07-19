@@ -12,7 +12,7 @@ export class AnnouncementsService {
   ) {}
 
   async create(userId: string, condoId: string, dto: CreateAnnouncementDto) {
-    const manager = await this.access.assert(userId, condoId);
+    const manager = await this.access.assert(userId, condoId, 'announcements');
     const scope = dto.scope ?? 'all';
     if (scope === 'block' && !dto.block_id) {
       throw new BadRequestException('Selecione o bloco para um comunicado por bloco.');

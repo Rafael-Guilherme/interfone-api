@@ -105,6 +105,17 @@ export class UpdateCondominiumDto {
   geo?: GeoInput;
 }
 
+export class ManagerPermissionsDto {
+  @IsArray()
+  @IsString({ each: true })
+  permissions!: string[];
+}
+
+export class ManagerActionDto {
+  @IsIn(['approve', 'reject', 'remove'])
+  action!: 'approve' | 'reject' | 'remove';
+}
+
 export class ResidentActionDto {
   @IsIn(['approve', 'reject'])
   action!: 'approve' | 'reject';

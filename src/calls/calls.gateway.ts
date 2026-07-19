@@ -83,6 +83,13 @@ export class CallsGateway implements OnGatewayConnection {
       if (auth.role === 'resident') {
         const payload = await this.jwt.verifyAsync(auth.token);
         const userId = payload.sub as string;
+        // Mesmo motivo do JwtAuthGuard: bloqueio pelo painel tem de valer já,
+        // senão o usuário continua recebendo chamadas com o token antigo.
+        const user = await this.prisma.user.findUnique({
+          where: { id: userId },
+          select: { status: true },
+        });
+        if (!user || user.status !== 'active') throw new Error('conta bloqueada');
         const profiles = await this.prisma.profile.findMany({
           where: { user_id: userId, status: 'active' },
           include: { unit_memberships: { select: { unit_id: true } } },
@@ -94,6 +101,14 @@ export class CallsGateway implements OnGatewayConnection {
         this.logger.debug(`+ resident ${userId} units=[${unitIds.join(',')}]`);
       } else {
         const qr = await this.delivery.resolveQr(auth.qrToken ?? auth.token);
+        // Se o interfone tem cerca virtual, exige o passe emitido pelo /q/:token
+        // após validar a posição — senão bastaria conectar direto aqui e a
+        // verificação da web viraria enfeite.
+        if (await this.delivery.exigeGeo(qr.condominium.id)) {
+          if (!(await this.delivery.validarPasse(qr.condominium.id, auth.geoPass))) {
+            throw new Error('geolocalização não verificada');
+          }
+        }
         Object.assign(client.data, { role: 'delivery', condoId: qr.condominium.id });
         this.logger.debug(`+ delivery condo=${qr.condominium.id}`);
       }
@@ -127,6 +142,7 @@ export class CallsGateway implements OnGatewayConnection {
     const memberships = await this.prisma.unitMembership.findMany({
       where: {
         unit_id: body.unitId,
+        in_queue: true, // moradores que o dono da unidade tirou da fila não tocam
         profile: { condominium_id: condoId, status: 'active', role: 'resident' },
       },
       orderBy: [{ call_order: 'asc' }, { created_at: 'asc' }],

@@ -5,11 +5,12 @@ import {
   Get,
   Param,
   ParseUUIDPipe,
+  Patch,
   Post,
   UseGuards,
 } from '@nestjs/common';
 import { ResidentService } from './resident.service';
-import { CreateReservationDto, CreateResidentQrDto } from './dto';
+import { CreateReservationDto, CreateResidentQrDto, SetCallQueueDto } from './dto';
 import { CurrentUserId, JwtAuthGuard } from '../common/jwt-auth.guard';
 
 @UseGuards(JwtAuthGuard)
@@ -20,6 +21,16 @@ export class ResidentController {
   @Get('areas')
   areas(@CurrentUserId() u: string, @Param('condoId', ParseUUIDPipe) c: string) {
     return this.service.areas(u, c);
+  }
+
+  /** Dias disponíveis da área — alimenta o calendário da 2ª etapa da reserva. */
+  @Get('areas/:areaId/calendar')
+  areaCalendar(
+    @CurrentUserId() u: string,
+    @Param('condoId', ParseUUIDPipe) c: string,
+    @Param('areaId', ParseUUIDPipe) a: string,
+  ) {
+    return this.service.areaCalendar(u, c, a);
   }
 
   @Post('reservations')
@@ -55,6 +66,20 @@ export class ResidentController {
   @Get('calls')
   callHistory(@CurrentUserId() u: string, @Param('condoId', ParseUUIDPipe) c: string) {
     return this.service.callHistory(u, c);
+  }
+
+  @Get('call-queue')
+  callQueue(@CurrentUserId() u: string, @Param('condoId', ParseUUIDPipe) c: string) {
+    return this.service.callQueue(u, c);
+  }
+
+  @Patch('call-queue')
+  setCallQueue(
+    @CurrentUserId() u: string,
+    @Param('condoId', ParseUUIDPipe) c: string,
+    @Body() dto: SetCallQueueDto,
+  ) {
+    return this.service.setCallQueue(u, c, dto.unit_id, dto.entradas);
   }
 
   @Get('qrcodes')

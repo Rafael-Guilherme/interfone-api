@@ -1,8 +1,21 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { ResidentAccess } from './resident-access.service';
 import { CreateReservationDto, CreateResidentQrDto } from './dto';
+import {
+  diaParaData,
+  hoje,
+  intervaloDoDia,
+  montarCalendario,
+  ultimoDiaReservavel,
+} from '../common-areas/calendar';
 
 /** Jornada do morador: reservas, comunicados, recados e QR de visita. */
 @Injectable()
@@ -18,37 +31,86 @@ export class ResidentService {
     const areas = await this.prisma.commonArea.findMany({
       where: { condominium_id: condoId, enabled: true },
       orderBy: { name: 'asc' },
-      select: { id: true, name: true, capacity: true, fee_cents: true },
+      select: { id: true, name: true, capacity: true, fee_cents: true, max_days_ahead: true },
     });
     return areas;
   }
 
+  /** Calendário da área: o morador escolhe o dia a partir daqui. */
+  async areaCalendar(userId: string, condoId: string, areaId: string, dias = 60) {
+    const { profile } = await this.access.assert(userId, condoId);
+    const area = await this.prisma.commonArea.findFirst({
+      where: { id: areaId, condominium_id: condoId, enabled: true },
+      select: { id: true, name: true, max_days_ahead: true },
+    });
+    if (!area) throw new NotFoundException('Área comum indisponível.');
+    const days = await montarCalendario(this.prisma, area.id, {
+      dias,
+      profileId: profile.id,
+      maxDaysAhead: area.max_days_ahead,
+    });
+    return { area: { id: area.id, name: area.name, max_days_ahead: area.max_days_ahead }, days };
+  }
+
+  /**
+   * Reserva pelo dia inteiro. O antigo formato com hora/duração caía na guarda
+   * de "não reservar no passado" sempre que o horário padrão da tela já tinha
+   * passado — o morador simplesmente não conseguia reservar à tarde.
+   */
   async createReservation(userId: string, condoId: string, dto: CreateReservationDto) {
     const { profile } = await this.access.assert(userId, condoId);
-    const starts = new Date(dto.starts_at);
-    const ends = new Date(dto.ends_at);
-    if (!(starts < ends)) throw new BadRequestException('Horário de término deve ser após o início.');
-    if (starts < new Date()) throw new BadRequestException('Não é possível reservar no passado.');
+
+    let dia: Date;
+    try {
+      dia = diaParaData(dto.day);
+    } catch {
+      throw new BadRequestException('Data inválida.');
+    }
+    // Comparação por DIA, não por instante: reservar "hoje" é válido durante
+    // todo o dia de hoje.
+    if (dia < hoje()) throw new BadRequestException('Não é possível reservar um dia que já passou.');
 
     const area = await this.prisma.commonArea.findFirst({
       where: { id: dto.common_area_id, condominium_id: condoId, enabled: true },
-      select: { id: true },
+      select: { id: true, max_days_ahead: true },
     });
     if (!area) throw new NotFoundException('Área comum indisponível.');
 
+    const limite = ultimoDiaReservavel(area.max_days_ahead);
+    if (limite && dia > limite) {
+      throw new BadRequestException(
+        `Esta área só pode ser reservada com até ${area.max_days_ahead} dias de antecedência.`,
+      );
+    }
+
+    const bloqueio = await this.prisma.areaBlock.findFirst({
+      where: { common_area_id: area.id, day: dia },
+      select: { reason: true },
+    });
+    if (bloqueio) {
+      throw new ConflictException(
+        bloqueio.reason
+          ? `Área indisponível nesse dia: ${bloqueio.reason}`
+          : 'Área indisponível nesse dia.',
+      );
+    }
+
+    const { starts, ends } = intervaloDoDia(dia);
     const overlap = await this.prisma.reservation.findFirst({
       where: {
-        common_area_id: dto.common_area_id,
-        status: 'confirmed',
+        common_area_id: area.id,
+        // Pendente também segura o dia — não deixa dois moradores pedirem o mesmo.
+        status: { in: ['confirmed', 'pending'] },
         starts_at: { lt: ends },
         ends_at: { gt: starts },
       },
       select: { id: true },
     });
-    if (overlap) throw new ConflictException('Já existe uma reserva nesse horário.');
+    if (overlap) throw new ConflictException('Esse dia já está reservado ou aguardando aprovação.');
 
+    // Reserva do morador nasce PENDENTE: o gestor precisa aprovar.
     const r = await this.prisma.reservation.create({
-      data: { common_area_id: dto.common_area_id, profile_id: profile.id, starts_at: starts, ends_at: ends },
+      data: { common_area_id: area.id, profile_id: profile.id, starts_at: starts, ends_at: ends, status: 'pending' },
       select: { id: true, starts_at: true, ends_at: true, status: true },
     });
     return r;
@@ -156,6 +218,93 @@ export class ResidentService {
           ? Math.max(0, Math.round((+c.ended_at - +c.answered_at) / 1000))
           : null,
     }));
+  }
+
+  // -------- fila de transbordo da unidade --------
+
+  /**
+   * Quem manda na fila é o morador ATIVO mais antigo da unidade — "a primeira
+   * pessoa cadastrada naquela unidade decide a fila". Empate de `created_at`
+   * (import em lote, p.ex.) desempata por id, para a resposta ser estável.
+   */
+  private async filaDaUnidade(unitId: string) {
+    const membros = await this.prisma.unitMembership.findMany({
+      where: { unit_id: unitId, profile: { status: 'active', role: 'resident' } },
+      include: { profile: { include: { user: { select: { id: true, name: true } } } } },
+      orderBy: [{ call_order: 'asc' }, { created_at: 'asc' }],
+    });
+    const maisAntigo = [...membros].sort(
+      (a, b) => +a.created_at - +b.created_at || a.id.localeCompare(b.id),
+    )[0];
+    return { membros, donoProfileId: maisAntigo?.profile_id ?? null };
+  }
+
+  /** Unidades do morador + a fila de cada uma, com quem pode editar. */
+  async callQueue(userId: string, condoId: string) {
+    const { profile, unitIds } = await this.access.assert(userId, condoId);
+    const unidades = await this.prisma.unit.findMany({
+      where: { id: { in: unitIds } },
+      include: { block: { select: { name: true } } },
+    });
+
+    return Promise.all(
+      unidades.map(async (u) => {
+        const { membros, donoProfileId } = await this.filaDaUnidade(u.id);
+        return {
+          unit_id: u.id,
+          unidade: u.block ? `Bloco ${u.block.name} · ${u.number}` : u.number,
+          // Só o dono edita; os demais veem a fila em modo leitura.
+          posso_editar: donoProfileId === profile.id,
+          moradores: membros.map((m, i) => ({
+            profile_id: m.profile_id,
+            nome: m.profile.user.name,
+            sou_eu: m.profile_id === profile.id,
+            ordem: i + 1,
+            na_fila: m.in_queue,
+          })),
+        };
+      }),
+    );
+  }
+
+  /**
+   * Grava a fila: quem participa e em que ordem. Recebe os profile_ids na ordem
+   * desejada + a lista de quem fica de fora.
+   */
+  async setCallQueue(
+    userId: string,
+    condoId: string,
+    unitId: string,
+    entradas: { profile_id: string; na_fila: boolean }[],
+  ) {
+    const { profile, unitIds } = await this.access.assert(userId, condoId);
+    if (!unitIds.includes(unitId)) throw new NotFoundException('Unidade não encontrada.');
+
+    const { membros, donoProfileId } = await this.filaDaUnidade(unitId);
+    if (donoProfileId !== profile.id) {
+      throw new ForbiddenException('Só o primeiro morador cadastrado na unidade pode alterar a fila.');
+    }
+
+    const validos = new Set(membros.map((m) => m.profile_id));
+    const desconhecido = entradas.find((e) => !validos.has(e.profile_id));
+    if (desconhecido) throw new BadRequestException('Morador não pertence a esta unidade.');
+    if (entradas.length !== membros.length) {
+      throw new BadRequestException('Envie todos os moradores da unidade.');
+    }
+    // Uma unidade sem ninguém na fila nunca tocaria — o interfone ficaria mudo.
+    if (!entradas.some((e) => e.na_fila)) {
+      throw new BadRequestException('Ao menos um morador precisa estar na fila.');
+    }
+
+    await this.prisma.$transaction(
+      entradas.map((e, i) =>
+        this.prisma.unitMembership.updateMany({
+          where: { unit_id: unitId, profile_id: e.profile_id },
+          data: { call_order: i, in_queue: e.na_fila },
+        }),
+      ),
+    );
+    return { ok: true };
   }
 
   // -------- QR do morador (visitas) --------
