@@ -12,6 +12,7 @@ import { Namespace, Socket } from 'socket.io';
 import { PrismaService } from '../prisma/prisma.service';
 import { LiveKitService } from '../livekit/livekit.service';
 import { DeliveryService } from '../delivery/delivery.service';
+import { PushService } from '../push/push.service';
 
 /**
  * Signaling do fluxo web (entregador) ↔ app (morador), respaldado no Postgres.
@@ -38,6 +39,13 @@ import { DeliveryService } from '../delivery/delivery.service';
  * etapa, passa ao próximo; fila esgotada → missed.
  */
 const RING_STEP_MS = Number(process.env.RING_STEP_TIMEOUT_MS ?? 20_000);
+
+/**
+ * Validade do push de chamada. Um pouco maior que a etapa, para tolerar atraso
+ * de rede — mas curto: entregue depois disso, o push só produziria uma
+ * notificação de uma chamada que já passou para o próximo da fila.
+ */
+const PUSH_TTL_S = Math.ceil(RING_STEP_MS / 1000) + 5;
 
 type CallMedia = 'audio' | 'video';
 
@@ -66,6 +74,7 @@ export class CallsGateway implements OnGatewayConnection {
     private readonly livekit: LiveKitService,
     private readonly delivery: DeliveryService,
     private readonly jwt: JwtService,
+    private readonly push: PushService,
   ) {}
 
   /**
@@ -211,8 +220,11 @@ export class CallsGateway implements OnGatewayConnection {
     if (runtime) runtime.answeredBy = client.data.userId as string;
 
     if (runtime) this.server.to(runtime.callerSocketId).emit('call:answered', { callId: call.id });
-    // Outros devices do MESMO morador param de tocar.
+    // Outros devices do MESMO morador param de tocar. O push cobre os que estão
+    // com o app fechado; o aparelho que atendeu recebe o cancelamento também,
+    // mas o app só o aplica enquanto está tocando — em chamada, ignora.
     client.to(`user:${client.data.userId}`).emit('call:cancelled', { callId: call.id });
+    void this.push.cancelarChamada([client.data.userId as string], call.id);
 
     this.logger.log(`call ${call.id} answered by ${client.data.userId}`);
     const grant = await this.livekit.issueGrant({
@@ -254,6 +266,10 @@ export class CallsGateway implements OnGatewayConnection {
       // Avisa quem atendeu ou, se ainda tocava, quem estava tocando na etapa.
       const target = rt.answeredBy ?? rt.queue[rt.stage];
       if (target) this.server.to(`user:${target}`).emit('call:ended', { callId: call.id });
+      // Push só faz sentido enquanto tocava: o entregador desistiu e o aparelho
+      // do morador precisa parar mesmo com o app fechado. Se já estava atendida,
+      // quem está em chamada tem o socket vivo e recebeu o `call:ended` acima.
+      if (next === 'missed' && target) void this.push.cancelarChamada([target], call.id);
       this.rt.delete(call.id);
     }
     this.logger.log(`call ${call.id} ${next}`);
@@ -266,6 +282,11 @@ export class CallsGateway implements OnGatewayConnection {
    * Toca no morador da etapa atual e arma o timer que passa ao próximo.
    * Só o morador da vez recebe `call:incoming` — daí a sala ser `user:<id>`
    * e não `unit:<id>`.
+   *
+   * Dois canais em paralelo, de propósito: o socket entrega na hora para quem
+   * está com o app aberto, e o push acorda o aparelho de quem está com o app
+   * em segundo plano ou fechado. Quem recebe pelos dois não toca duas vezes —
+   * a máquina de estados no app ignora um segundo `incoming` da mesma chamada.
    */
   private ringStage(callId: string) {
     const rt = this.rt.get(callId);
@@ -273,14 +294,21 @@ export class CallsGateway implements OnGatewayConnection {
     const userId = rt.queue[rt.stage];
     if (!userId) return;
 
+    const caller = 'Entregador na portaria';
     this.server.to(`user:${userId}`).emit('call:incoming', {
       callId,
-      caller: 'Entregador na portaria',
+      caller,
       media: rt.media,
       room: rt.room,
       stage: rt.stage + 1,
       stages: rt.queue.length,
     });
+    // Sem await: o push não pode atrasar o toque de quem já está conectado.
+    void this.push.notificarChamada(
+      userId,
+      { callId, caller, media: rt.media, room: rt.room },
+      PUSH_TTL_S,
+    );
     rt.timer = setTimeout(() => void this.advance(callId), RING_STEP_MS);
   }
 
@@ -296,7 +324,10 @@ export class CallsGateway implements OnGatewayConnection {
 
     // Para o toque no morador da etapa que está saindo (todos os devices dele).
     const leaving = rt.queue[rt.stage];
-    if (leaving) this.server.to(`user:${leaving}`).emit('call:cancelled', { callId });
+    if (leaving) {
+      this.server.to(`user:${leaving}`).emit('call:cancelled', { callId });
+      void this.push.cancelarChamada([leaving], callId);
+    }
 
     rt.stage += 1;
     if (rt.stage < rt.queue.length) {

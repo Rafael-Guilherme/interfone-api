@@ -30,6 +30,7 @@
     "@types/pdfkit": "^0.17.6",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.1",
+    "expo-server-sdk": "^6.1.0",
     "google-auth-library": "^10.9.0",
     "helmet": "^8.3.0",
     "livekit-server-sdk": "^2.9.2",

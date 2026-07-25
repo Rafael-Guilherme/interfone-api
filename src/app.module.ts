@@ -5,6 +5,8 @@ import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { PrismaModule } from './prisma/prisma.module';
 import { MailModule } from './mail/mail.module';
+import { PushModule } from './push/push.module';
+import { DevicesModule } from './devices/devices.module';
 import { LiveKitModule } from './livekit/livekit.module';
 import { AuthModule } from './auth/auth.module';
 import { CondominiumsModule } from './condominiums/condominiums.module';
@@ -70,8 +72,10 @@ function segredoJwt(cfg: ConfigService): string {
     }),
     PrismaModule,
     MailModule,
+    PushModule,
     LiveKitModule,
     AuthModule,
+    DevicesModule,
     CondominiumsModule,
     AnnouncementsModule,
     CommonAreasModule,
