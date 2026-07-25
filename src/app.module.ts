@@ -67,7 +67,11 @@ function segredoJwt(cfg: ConfigService): string {
       inject: [ConfigService],
       useFactory: (cfg: ConfigService) => ({
         secret: segredoJwt(cfg),
-        signOptions: { expiresIn: '7d' }, // dev: token longo simplifica o teste
+        // Padrão curto: o access token não é revogável, então o estrago de um
+        // vazamento dura o tempo dele. Quem segura a sessão por 7 dias é o
+        // refresh (ver AuthService). Os tokens de uso único — passe de
+        // geolocalização, link do PDF — passam o próprio `expiresIn`.
+        signOptions: { expiresIn: process.env.JWT_ACCESS_TTL ?? '30m' },
       }),
     }),
     PrismaModule,

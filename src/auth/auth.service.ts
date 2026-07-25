@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { OAuth2Client } from 'google-auth-library';
-import { createHash, randomInt } from 'node:crypto';
+import { createHash, randomBytes, randomInt } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { MailService } from '../mail/mail.service';
 
@@ -20,6 +20,22 @@ import { MailService } from '../mail/mail.service';
  */
 /** Tentativas erradas antes de queimar o código. */
 const MAX_TENTATIVAS_OTP = 5;
+
+/**
+ * Sessão em duas peças, com janela deslizante:
+ *
+ *   access  — JWT curto, vai em toda requisição. Expirou, o app troca sozinho.
+ *   refresh — opaco e longo, guardado no aparelho e (em hash) no banco.
+ *             Cada uso emite um novo e revoga o anterior (rotação), então quem
+ *             usa o app continua logado indefinidamente; parou de usar por
+ *             REFRESH_TTL_DIAS, precisa entrar de novo.
+ *
+ * O access é curto de propósito: ele não pode ser revogado (é assinado, não
+ * consultado), então o estrago de um token vazado dura o tempo dele. Quem
+ * revoga é o refresh, que passa pelo banco.
+ */
+const ACCESS_TTL = process.env.JWT_ACCESS_TTL ?? '30m';
+const REFRESH_TTL_DIAS = Number(process.env.REFRESH_TTL_DIAS ?? 7);
 
 @Injectable()
 export class AuthService {
@@ -38,6 +54,97 @@ export class AuthService {
   private hashCode(code: string) {
     const secret = process.env.JWT_ACCESS_SECRET ?? 'dev';
     return createHash('sha256').update(`${code}:${secret}`).digest('hex');
+  }
+
+  /**
+   * Emite o par access+refresh e devolve a sessão no formato que o app espera.
+   *
+   * O refresh é opaco (bytes aleatórios), não um JWT: assim ele só vale se
+   * estiver no banco, e revogar é apagar uma linha. No banco fica só o hash —
+   * um vazamento do dump não dá sessão a ninguém, mesma lógica do OTP.
+   */
+  private async emitirSessao(user: { id: string; email: string; name: string }) {
+    const access = await this.jwt.signAsync(
+      { sub: user.id, email: user.email },
+      { expiresIn: ACCESS_TTL },
+    );
+    const refresh = randomBytes(48).toString('base64url');
+    await this.prisma.refreshToken.create({
+      data: {
+        user_id: user.id,
+        token_hash: this.hashCode(refresh),
+        expires_at: new Date(Date.now() + REFRESH_TTL_DIAS * 86_400_000),
+      },
+    });
+
+    return {
+      access,
+      refresh,
+      user: { id: user.id, email: user.email, name: user.name },
+      profiles: await this.profilesOf(user.id),
+    };
+  }
+
+  /**
+   * Troca o refresh por um par novo (rotação) — é isto que mantém logado quem
+   * usa o app: cada renovação empurra o prazo por mais REFRESH_TTL_DIAS.
+   *
+   * Um refresh já usado nunca é aceito de novo. Se aparecer, ou é uma repetição
+   * de requisição, ou alguém copiou o token do aparelho: nos dois casos
+   * derrubamos TODAS as sessões do usuário, porque não há como distinguir o
+   * dono do impostor — os dois têm o mesmo token.
+   */
+  async refresh(token: string) {
+    if (!token) throw new UnauthorizedException('Sessão inválida.');
+    const registro = await this.prisma.refreshToken.findUnique({
+      where: { token_hash: this.hashCode(token) },
+      include: { user: true },
+    });
+
+    if (!registro) throw new UnauthorizedException('Sessão inválida.');
+
+    if (registro.revoked_at) {
+      await this.prisma.refreshToken.updateMany({
+        where: { user_id: registro.user_id, revoked_at: null },
+        data: { revoked_at: new Date() },
+      });
+      this.logger.warn(`refresh reutilizado — sessões do usuário ${registro.user_id} revogadas`);
+      throw new UnauthorizedException('Sessão expirada. Entre novamente.');
+    }
+
+    if (registro.expires_at < new Date()) {
+      throw new UnauthorizedException('Sessão expirada. Entre novamente.');
+    }
+    if (registro.user.status !== 'active') {
+      throw new UnauthorizedException('Esta conta está bloqueada.');
+    }
+
+    await this.prisma.refreshToken.update({
+      where: { id: registro.id },
+      data: { revoked_at: new Date() },
+    });
+    // Aproveita a visita para limpar o que já venceu deste usuário; sem isso a
+    // tabela só cresce, um registro por renovação.
+    await this.prisma.refreshToken.deleteMany({
+      where: { user_id: registro.user_id, expires_at: { lt: new Date() } },
+    });
+
+    return this.emitirSessao(registro.user);
+  }
+
+  /**
+   * Logout: encerra só a sessão deste aparelho — os outros seguem válidos.
+   *
+   * Apaga a linha em vez de marcá-la como revogada, e a diferença importa: um
+   * refresh *revogado* que reaparece é tratado como roubo e derruba todas as
+   * sessões do usuário. Sair do app não é roubo — se o registro ficasse
+   * revogado, um retry do cliente depois do logout expulsaria a pessoa dos
+   * outros aparelhos dela. Apagado, ele vira "não existe" e leva só um 401.
+   */
+  async logout(token?: string) {
+    if (!token) return { ok: true };
+    await this.prisma.refreshToken.deleteMany({ where: { token_hash: this.hashCode(token) } });
+    return { ok: true };
   }
 
   async requestOtp(email: string, name?: string) {
@@ -131,12 +238,7 @@ export class AuthService {
       });
     }
 
-    const access = await this.jwt.signAsync({ sub: user.id, email: user.email });
-    return {
-      access,
-      user: { id: user.id, email: user.email, name: user.name },
-      profiles: await this.profilesOf(user.id),
-    };
+    return this.emitirSessao(user);
   }
 
   /**
@@ -187,12 +289,7 @@ export class AuthService {
       this.logger.log(`Novo usuário via Google: ${email}`);
     }
 
-    const access = await this.jwt.signAsync({ sub: user.id, email: user.email });
-    return {
-      access,
-      user: { id: user.id, email: user.email, name: user.name },
-      profiles: await this.profilesOf(user.id),
-    };
+    return this.emitirSessao(user);
   }
 
   /** Verifica o id_token do Google e devolve o payload já validado. */

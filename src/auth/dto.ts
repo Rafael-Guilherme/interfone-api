@@ -24,6 +24,20 @@ export class VerifyOtpDto {
   code!: string;
 }
 
+export class RefreshDto {
+  /** Token opaco emitido no login. Não é JWT: só vale se estiver no banco. */
+  @IsString()
+  @MaxLength(255)
+  refresh!: string;
+}
+
+export class LogoutDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  refresh?: string;
+}
+
 export class GoogleLoginDto {
   /** id_token (JWT do Google) obtido pelo sign-in nativo no app. */
   @IsString()

@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Patch, Post, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
-import { GoogleLoginDto, RequestOtpDto, UpdateMeDto, VerifyOtpDto } from './dto';
+import { GoogleLoginDto, LogoutDto, RefreshDto, RequestOtpDto, UpdateMeDto, VerifyOtpDto } from './dto';
 import { CurrentUserId, JwtAuthGuard } from '../common/jwt-auth.guard';
 
 @Controller()
@@ -38,6 +38,26 @@ export class AuthController {
   @Post('auth/google')
   google(@Body() dto: GoogleLoginDto) {
     return this.auth.loginWithGoogle(dto.id_token);
+  }
+
+  /**
+   * Renova a sessão. É o que mantém o morador logado entre uma chamada e outra
+   * sem pedir o código de novo — e o que expira a conta de quem sumiu por
+   * REFRESH_TTL_DIAS.
+   *
+   * Limite mais folgado que o do OTP: aqui não há e-mail nem código a adivinhar
+   * (o token tem 48 bytes aleatórios), e o app renova sozinho a cada abertura.
+   */
+  @Throttle({ curto: { ttl: 60_000, limit: 20 }, longo: { ttl: 3_600_000, limit: 120 } })
+  @Post('auth/refresh')
+  refresh(@Body() dto: RefreshDto) {
+    return this.auth.refresh(dto.refresh);
+  }
+
+  /** Encerra a sessão DESTE aparelho. Sem guard: um token já inválido também sai. */
+  @Post('auth/logout')
+  logout(@Body() dto: LogoutDto) {
+    return this.auth.logout(dto.refresh);
   }
 
   @UseGuards(JwtAuthGuard)
