@@ -1,0 +1,34 @@
+name: CI
+
+# Roda em PR e no push da main. O objetivo é o que o cliente pediu: melhorar sem
+# regredir — nenhuma mudança entra sem compilar e passar na suíte.
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # O client do Prisma é gerado, não versionado: sem isto o typecheck não
+      # enxerga os modelos. Não precisa de banco — só do schema.
+      - run: npx prisma generate
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Testes
+        run: npm test -- --ci
+
+      - name: Build
+        run: npm run build

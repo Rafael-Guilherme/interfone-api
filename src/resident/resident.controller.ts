@@ -58,9 +58,21 @@ export class ResidentController {
     return this.service.markRead(u, c, a);
   }
 
+  /** Contadores dos atalhos do início: o que há de novo em comunicados e recados. */
+  @Get('badges')
+  badges(@CurrentUserId() u: string, @Param('condoId', ParseUUIDPipe) c: string) {
+    return this.service.badges(u, c);
+  }
+
   @Get('recados')
   recados(@CurrentUserId() u: string, @Param('condoId', ParseUUIDPipe) c: string) {
     return this.service.recados(u, c);
+  }
+
+  /** Abrir a tela de recados zera o sinalizador. */
+  @Post('recados/read')
+  readRecados(@CurrentUserId() u: string, @Param('condoId', ParseUUIDPipe) c: string) {
+    return this.service.markRecadosRead(u, c);
   }
 
   @Get('calls')

@@ -200,6 +200,11 @@ model Profile {
   permissions    String[]      @default([])
   approved_by_id String?       @db.Uuid
   approved_at    DateTime?
+  // Última vez que o morador abriu a tela de recados. É o marcador do "tem
+  // novidade" no início: recado mais novo que isto ainda não foi visto.
+  // Fica aqui, e não em cada recado, porque a lista mistura duas origens
+  // (mensagens da web e chamadas perdidas) e só uma delas tem tabela própria.
+  recados_seen_at DateTime?
   created_at     DateTime      @default(now())
   updated_at     DateTime      @updatedAt
 

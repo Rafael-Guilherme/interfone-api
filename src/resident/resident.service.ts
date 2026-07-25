@@ -161,6 +161,67 @@ export class ResidentService {
     return { ok: true };
   }
 
+  // -------- sinalizador de novidades no início --------
+
+  /**
+   * Contadores para os atalhos do início ("tem coisa nova aqui").
+   *
+   * Uma requisição só, em vez de baixar as duas listas inteiras para contar no
+   * app: a tela de início é a mais aberta do produto e roda a cada foco.
+   */
+  async badges(userId: string, condoId: string) {
+    const { profile, unitIds } = await this.access.assert(userId, condoId);
+    const desde = profile.recados_seen_at;
+
+    const [comunicados, mensagens, chamadas] = await Promise.all([
+      // Comunicado é lido um a um (tem tela de detalhe), então o não-lido sai
+      // da ausência de registro em AnnouncementRead.
+      this.prisma.announcement.count({
+        where: {
+          condominium_id: condoId,
+          OR: [{ scope: 'all' }, { scope: 'block', block_id: { in: await this.meusBlocos(unitIds) } }],
+          reads: { none: { profile_id: profile.id } },
+        },
+      }),
+      this.prisma.missedCallMessage.count({
+        where: {
+          condominium_id: condoId,
+          OR: [{ unit_id: { in: unitIds } }, { unit_id: null }],
+          ...(desde ? { created_at: { gt: desde } } : {}),
+        },
+      }),
+      this.prisma.call.count({
+        where: {
+          condominium_id: condoId,
+          unit_id: { in: unitIds },
+          status: { in: ['missed', 'declined'] },
+          ...(desde ? { started_at: { gt: desde } } : {}),
+        },
+      }),
+    ]);
+
+    return { comunicados, recados: mensagens + chamadas };
+  }
+
+  /** Marca os recados como vistos — o app chama ao abrir a tela. */
+  async markRecadosRead(userId: string, condoId: string) {
+    const { profile } = await this.access.assert(userId, condoId);
+    await this.prisma.profile.update({
+      where: { id: profile.id },
+      data: { recados_seen_at: new Date() },
+    });
+    return { ok: true };
+  }
+
+  /** Blocos das minhas unidades — recorte dos comunicados por bloco. */
+  private async meusBlocos(unitIds: string[]) {
+    const units = await this.prisma.unit.findMany({
+      where: { id: { in: unitIds } },
+      select: { block_id: true },
+    });
+    return [...new Set(units.map((u) => u.block_id).filter(Boolean))] as string[];
+  }
+
   // -------- recados (mensagens da web + chamadas perdidas/recusadas) --------
   async recados(userId: string, condoId: string) {
     const { unitIds } = await this.access.assert(userId, condoId);
