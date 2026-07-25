@@ -23,3 +23,10 @@ export class VerifyOtpDto {
   @Length(6, 6)
   code!: string;
 }
+
+export class GoogleLoginDto {
+  /** id_token (JWT do Google) obtido pelo sign-in nativo no app. */
+  @IsString()
+  @MaxLength(4096)
+  id_token!: string;
+}

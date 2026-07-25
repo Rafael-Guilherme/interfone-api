@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Patch, Post, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
-import { RequestOtpDto, UpdateMeDto, VerifyOtpDto } from './dto';
+import { GoogleLoginDto, RequestOtpDto, UpdateMeDto, VerifyOtpDto } from './dto';
 import { CurrentUserId, JwtAuthGuard } from '../common/jwt-auth.guard';
 
 @Controller()
@@ -28,6 +28,16 @@ export class AuthController {
   @Post('auth/verify-otp')
   verifyOtp(@Body() dto: VerifyOtpDto) {
     return this.auth.verifyOtp(dto.email, dto.code);
+  }
+
+  /**
+   * Login/registro com Google (só o app usa). O app manda o `id_token` do
+   * sign-in nativo; o servidor verifica e devolve a mesma sessão do OTP.
+   */
+  @Throttle({ curto: { ttl: 60_000, limit: 10 }, longo: { ttl: 3_600_000, limit: 60 } })
+  @Post('auth/google')
+  google(@Body() dto: GoogleLoginDto) {
+    return this.auth.loginWithGoogle(dto.id_token);
   }
 
   @UseGuards(JwtAuthGuard)

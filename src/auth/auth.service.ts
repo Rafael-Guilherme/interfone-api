@@ -5,6 +5,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
+import { OAuth2Client } from 'google-auth-library';
 import { createHash, randomInt } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { MailService } from '../mail/mail.service';
@@ -24,6 +25,9 @@ const MAX_TENTATIVAS_OTP = 5;
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
   private readonly isProd = process.env.NODE_ENV === 'production';
+  // Sem clientId fixo: a verificação valida o `aud` contra a lista de audiences
+  // (os client IDs de iOS/Android), como manda o fluxo de ID token nativo.
+  private readonly googleClient = new OAuth2Client();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -133,6 +137,85 @@ export class AuthService {
       user: { id: user.id, email: user.email, name: user.name },
       profiles: await this.profilesOf(user.id),
     };
+  }
+
+  /**
+   * Login/registro com Google (SÓ no app — o painel web usa OTP).
+   *
+   * O app faz o sign-in nativo e manda o `id_token`; aqui a assinatura, a
+   * expiração e o `aud` (client IDs iOS/Android) são verificados contra as
+   * chaves públicas do Google. Depois é o mesmo acha-ou-cria da referência
+   * `rota-api`: existe por google_id/e-mail → loga; senão cria a conta. A
+   * sessão devolvida tem o MESMO formato do `verifyOtp` (o app não distingue).
+   */
+  async loginWithGoogle(idToken: string) {
+    const payload = await this.verificarTokenGoogle(idToken);
+    const email = payload.email?.toLowerCase();
+    if (!email) throw new UnauthorizedException('Conta Google sem e-mail.');
+
+    // Casa por google_id (login recorrente) ou por e-mail (vincula uma conta que
+    // já existia via OTP ao Google).
+    let user = await this.prisma.user.findFirst({
+      where: { OR: [{ google_id: payload.sub }, { email }] },
+    });
+
+    if (user) {
+      if (user.status !== 'active') throw new UnauthorizedException('Esta conta está bloqueada.');
+      // Completa o que faltar sem sobrescrever o que o usuário já definiu.
+      const data: {
+        google_id?: string;
+        email_verified_at?: Date;
+        avatar_url?: string;
+      } = {};
+      if (!user.google_id) data.google_id = payload.sub;
+      if (!user.email_verified_at && payload.email_verified) data.email_verified_at = new Date();
+      if (!user.avatar_url && payload.picture) data.avatar_url = payload.picture;
+      if (Object.keys(data).length) {
+        user = await this.prisma.user.update({ where: { id: user.id }, data });
+      }
+    } else {
+      user = await this.prisma.user.create({
+        data: {
+          email,
+          google_id: payload.sub,
+          name: payload.name?.trim() || email.split('@')[0],
+          avatar_url: payload.picture ?? null,
+          // O Google já verificou o e-mail; não precisa de OTP.
+          email_verified_at: payload.email_verified ? new Date() : null,
+        },
+      });
+      this.logger.log(`Novo usuário via Google: ${email}`);
+    }
+
+    const access = await this.jwt.signAsync({ sub: user.id, email: user.email });
+    return {
+      access,
+      user: { id: user.id, email: user.email, name: user.name },
+      profiles: await this.profilesOf(user.id),
+    };
+  }
+
+  /** Verifica o id_token do Google e devolve o payload já validado. */
+  private async verificarTokenGoogle(idToken: string) {
+    const audience = [
+      process.env.GOOGLE_CLIENT_ID_IOS,
+      process.env.GOOGLE_CLIENT_ID_ANDROID,
+    ].filter((v): v is string => !!v && !v.startsWith('xxxx'));
+
+    if (audience.length === 0) {
+      throw new InternalServerErrorException('Login com Google não está configurado no servidor.');
+    }
+
+    let ticket;
+    try {
+      ticket = await this.googleClient.verifyIdToken({ idToken, audience });
+    } catch (e) {
+      this.logger.warn(`Falha ao verificar token Google: ${(e as Error).message}`);
+      throw new UnauthorizedException('Não foi possível validar o login com Google.');
+    }
+    const payload = ticket.getPayload();
+    if (!payload?.sub) throw new UnauthorizedException('Token do Google inválido.');
+    return payload;
   }
 
   /** GET /me — usuário + perfis (condo, papel, unidades) para o app. */
